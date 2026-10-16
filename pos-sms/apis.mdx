@@ -1,0 +1,51 @@
+---
+title: The three APIs and their JavaScript
+description: SyncDashboardData_New, Bill_SendSMS_New and Bill_SMS_Skip.
+---
+
+## 2. What each API does (and the JS in it)
+
+A hook is a small JavaScript function with the signature `(memdata, configdata, paramdata)`. `paramdata` is the data going in, `configdata` is the config box, `memdata` is shared memory between steps. The function returns the new `paramdata`.
+
+### API 1: `SyncDashboardData_New` (saves the bill)
+
+| Step | Hook / SQL | What it does |
+|---|---|---|
+| PreProc | `POS_SMS_SYNC_PREPROC` | Selects the DB profile. Reads the POS envelope (`Payload` is a JSON string inside JSON). For each bill it keeps `client_id` (the envelope `Clientid` wins), `billRef`, `bill_date`, `bill_no`, `customer_name` and `mobile` (from `cust_mobile`, `mobile`, `mobile_no` or `card_no`). Parks them in memory. Doubles single quotes so the SQL does not break. |
+| SQL | `exec SyncDashboardData @BillData = '__jsonData'` | Saves the bill into `Sync_BillHdr`, `sync_BillTran`, `Sync_BillPayment`. |
+| PostProc | `POS_SMS_SYNC_POSTPROC` | Checks the procedure answered `True`. If not, it **throws** and the POS gets the error. Otherwise returns the list of bills for the next step. |
+| Dispatch URL | `POS_SMS_SYNC_DispatchUrl` | Decides where the call goes next (see below). |
+| Dispatch PostProc | `POS_SMS_SYNC_DispatchResponse` | Builds the final reply to the POS. |
+
+**`POS_SMS_SYNC_DispatchUrl`** reads its config box (a JSON array, `["<Bill_SendSMS_New url>"]`, optional second item = skip url):
+- some bill has a mobile number: it sets the Dispatch URL to `Bill_SendSMS_New`.
+- no bill has a mobile number: it sets it to `Bill_SMS_Skip` (the second item, or the first URL with the last part replaced).
+- no config: it leaves the URL alone. It never throws.
+
+**`POS_SMS_SYNC_DispatchResponse`** runs only when the call returns 2xx. It builds:
+```json
+{"Clientid":"81150","Refno":"50","Responsetype":"REST_POS_BILL_SAVE","Uniqueid":"8115082701","Success":"TRUE","Response":"<base64 text>"}
+```
+- `Success` is always `"TRUE"`: when this runs the bill is already saved.
+- `Response` is base64 of the text: the Notification Server's message (e.g. `SMS sent`), or `SMS sent` when there was no mobile (change with `skip_response` in the config).
+- `Clientid`, `Refno`, `Responsetype`, `Uniqueid` are copied from the POS request.
+
+### API 2: `Bill_SendSMS_New` (sends the SMS)
+
+| Step | Hook / SQL | What it does |
+|---|---|---|
+| PreProc | `POS_BillSMS_BuildSpInput` | Turns the bills into `{"bills":[...]}` for the procedure. |
+| SQL | `exec GetBill_SMS_V2 @jsonInput = '__jsonData'` | Per bill: finds the client in `POS_SMS_ClientConfig`; checks the bill exists in `Sync_BillHdr` (when `require_bill = 1`); cleans the mobile (10 to 15 digits); skips a bill that already has a SUCCESS or QUEUED SMS; builds the Notification Server request from the client's template; writes a `PENDING` row to `POS_SMS_Log`. Returns each bill as `READY` or `SKIPPED` with a reason. |
+| PostProc | `POS_BillSMS_SpResultToRequests` | Keeps only the `READY` bills and returns the request body for the Notification Server. Remembers the bill for the reply. |
+| Dispatch PreProc | `POS_BillSMS_DispatchPreProc` | Sets the headers: `Authorization: Bearer <token of the bill's client>` and `Content-Type: application/json`. |
+| Dispatch URL | `POS_BillSMS_SetUrl_config` | Sets the URL from `notify_url` (default `https://alert24.me:9603/api/v2/notify?wait=true`). |
+| Dispatch PostProc | `POS_BillSMS_ParseResponse` | Reads the Notification Server's answer and returns `SUCCESS`, `QUEUED` or `FAILED` with a message. |
+
+Config box of this API's Dispatch: `{"notify_url":"https://alert24.me:9603/api/v2/notify?wait=true","tokens":{"<client_id>":"<bearer token>"}}`.
+
+### API 3: `Bill_SMS_Skip` (does nothing)
+
+- Fetch part only: PreProc `POS_BillSMS_SkipPreProc` (sets the DB profile), SQL `select 1 as ok`, PostProc `POS_BillSMS_SkipPostProc` (returns `{"Success":true,"Status":"SKIPPED"}`).
+- No Dispatch part.
+- Its only job is to answer **200**, because the server runs `POS_SMS_SYNC_DispatchResponse` only on a 2xx.
+

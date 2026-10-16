@@ -1,0 +1,84 @@
+---
+title: Where settings live and config data
+description: Config boxes, tokens and how to check them.
+---
+
+## 5. Where each setting lives
+
+| Setting | Where |
+|---|---|
+| `["…/Bill_SendSMS_New"]` (optional 2nd item = skip url) | Dispatch config of `SyncDashboardData_New` |
+| `notify_url`, `tokens` | Dispatch config of `Bill_SendSMS_New` |
+| Dispatch URL setting of `Bill_SendSMS_New` | must be the notify URL, not `http://localhost:8803/…` |
+| Client, template, contract, language | table `POS_SMS_ClientConfig` (per client database) |
+| SMS gateway, bearer tokens, DocGen key | Notification Server `clients.yaml` and channel credentials |
+| Receipt layout | DocGen template `dashboard_sales_invoice.yaml`; data from CrudServer schema `dashboard_sales_invoice` |
+
+## 5b. Config data in detail
+
+A "config box" is a text field in the API's Dispatch section. The server hands its content to the hooks as `configdata`. There are two boxes, one per API. They are different, so do not mix them up.
+
+### Config box 1: Dispatch of `SyncDashboardData_New`
+Read by `POS_SMS_SYNC_DispatchUrl` (and `POS_SMS_SYNC_DispatchResponse` for `skip_response`).
+
+Simplest form, a JSON array with the URL of `Bill_SendSMS_New`:
+```json
+["https://<host>:<port>/<remserv-id>/jobschedularsms/Bill_SendSMS_New"]
+```
+- Item 1 = where bills with a mobile number go.
+- Item 2 (optional) = where bills with no mobile go. If you leave it out, it is built from item 1 by replacing the last part with `Bill_SMS_Skip`.
+- An object also works: `{"send_url":"…","skip_url":"…","skip_response":"NONE"}`. `skip_response` is the text the POS gets for a bill with no mobile; the default is `SMS sent`.
+- `<remserv-id>` differs per server (`CLOUDSRV_MADONA`, `CLOUDSRV_HAPPYPANDA`). Use the one from that server's own log line `updateMemData … DispatchUrl value : …`.
+- Empty or invalid config: the URL hook leaves the Dispatch URL setting alone and never throws.
+
+### Config box 2: Dispatch of `Bill_SendSMS_New`
+Read by `POS_BillSMS_SetUrl_config` and `POS_BillSMS_DispatchPreProc`.
+```json
+{
+  "notify_url": "https://alert24.me:9603/api/v2/notify?wait=true",
+  "tokens": { "81150": "<bearer token of client 81150>", "81201": "<bearer token of client 81201>" }
+}
+```
+- `notify_url`: the Notification Server endpoint. Optional; the default is the URL above.
+- `tokens`: one bearer token per `client_id`, sent as `Authorization: Bearer <token>`. It must match the `bearer_token` of that client in the Notification Server's `clients.yaml`. A client with no token gets no header and the Notification Server rejects the call.
+- Optional `skip_url`: only used if the SMS API itself has nothing to send; it is not needed for the no-mobile case, which is handled in API 1.
+- Tokens are never logged by these hooks.
+
+### Other configuration (not a config box)
+
+| What | Where | Used for |
+|---|---|---|
+| Dispatch URL setting of `Bill_SendSMS_New` | the API's Dispatch URL field | must be the notify URL on both servers; `http://localhost:8803/…` gives the HTTP-to-HTTPS 400 |
+| `POS_SMS_ClientConfig` row per client | client database | `enabled`, `contract_id`, `language`, `country_code`, `payload_template`, `require_bill` |
+| `clients.yaml` on the Notification Server | per client | `bearer_token`, SMS credential (`channel_credentials.sms`), DocGen key (`service_overrides.docgen`) |
+| Contract (`pos_bill_sms`, `review_sms`) | Notification Server | message text, short link and the `on_click` call to DocGen |
+| DocGen template and data integration | DocGen | receipt layout and the CrudServer source |
+
+## 5c. Checking the config data and the tokens
+
+### How to check what config data a server is passing
+
+1. Open the server (`CLOUDSRV_MADONA`, then `CLOUDSRV_HAPPYPANDA`) in the remote server admin.
+2. Click **Scripts**.
+3. Open the job `SCHEDULAR_JOB_SMS_NEW` and, for each API, look at the Dispatch part:
+   - `SyncDashboardData_New`: the config box should hold the array with the `Bill_SendSMS_New` URL of **that** server (and optionally the skip URL).
+   - `Bill_SendSMS_New`: the config box should hold `notify_url` and `tokens`, with the token for **that** server's client (81150 on Madona, 81201 on Happy Panda).
+4. Check the Dispatch URL field of `Bill_SendSMS_New` is the notify URL.
+5. Compare what you see with the log of a test bill: the lines `POS_SMS_SYNC_DispatchUrl: …` and `POS_BillSMS_SetUrl: …` show whether the config was read.
+
+### Where the token comes from
+
+The bearer token for each client is **generated on the Notification Server** and saved in its `clients.yaml`, under that client:
+```yaml
+- client_id: "81201"
+  enabled: true
+  bearer_token: "<token generated for this client>"
+  channel_credentials:
+    sms: <sms credential name>
+```
+The same token is then copied into the `tokens` of config box 2 on the matching server:
+```json
+{"notify_url":"https://alert24.me:9603/api/v2/notify?wait=true","tokens":{"81201":"<the bearer_token from clients.yaml>"}}
+```
+If the two differ by even one character, the Notification Server answers 401 and the SMS is not sent. When you generate or change a token, change it in both places, and restart or reload the Notification Server.
+

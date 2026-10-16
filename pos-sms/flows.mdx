@@ -1,0 +1,27 @@
+---
+title: Flows and the receipt link
+description: Step by step for a bill with and without a mobile number.
+---
+
+## 3. The two cases, step by step
+
+### A. Customer has a mobile number
+1. POS → `SyncDashboardData_New`: bill saved.
+2. `POS_SMS_SYNC_DispatchUrl` → `Bill_SendSMS_New`.
+3. `GetBill_SMS_V2` marks the bill `READY`; the notify body goes to the Notification Server with the client's bearer token.
+4. The Notification Server creates a short link for the receipt and sends the SMS through the client's SMS gateway (`status ok`, `sent 1`).
+5. `POS_BillSMS_ParseResponse` → `SUCCESS`; `POS_SMS_SYNC_DispatchResponse` → POS gets `Success: "TRUE"`.
+
+### B. No mobile number
+1. POS → `SyncDashboardData_New`: bill saved.
+2. `POS_SMS_SYNC_DispatchUrl` sees no mobile → `Bill_SMS_Skip`.
+3. `Bill_SMS_Skip` answers 200. No SMS, no Notification Server call, no log row.
+4. `POS_SMS_SYNC_DispatchResponse` → POS gets `Success: "TRUE"` and text `SMS sent`.
+
+## 4. The receipt link
+
+The SMS contains a short link (`https://alert24.me:9603/s/<code>`). When the customer opens it:
+1. The Notification Server calls DocGen (`/api/smartpos/documents/shared`) with the template `dashboard_sales_invoice.yaml`, the data integration `crudengine-dashboard-sales-invoice`, and `client_id`, `bill_date`, `billRef`. It uses the client's DocGen API key.
+2. DocGen asks CrudServer for the bill (`Sync_BillHdr`, `sync_BillTran`, `Sync_BillPayment`) and fills the template.
+3. The customer sees the receipt.
+

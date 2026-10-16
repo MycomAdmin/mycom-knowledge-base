@@ -1,0 +1,63 @@
+---
+title: GetBill_SMS_V2 and config tables
+description: The stored procedure, POS_SMS_ClientConfig and POS_SMS_Log.
+---
+
+## 5d. The `GetBill_SMS_V2` procedure and the config tables
+
+These live in **each client's own database** (Madona's database, Happy Panda's `RESTDB_ROYALPARK_LNK_OS`, and so on). Run `GetBill_SMS_V2.sql` once in each database. It creates the tables if they are missing and creates or replaces the procedure.
+
+### The tables
+
+| Table | Purpose | Written by |
+|---|---|---|
+| `dbo.POS_SMS_ClientConfig` | one row per client: how that client's SMS is built | you (setup), read by the procedure |
+| `dbo.POS_SMS_Log` | audit of every SMS attempt per bill | the procedure |
+| `dbo.Sync_BillHdr` | the bills saved by `SyncDashboardData` | the sync step; read by the procedure only to check the bill exists |
+
+### What goes into `POS_SMS_ClientConfig`
+
+| Column | Meaning | Example |
+|---|---|---|
+| `client_id` (key) | the POS client id | `81150` |
+| `enabled` | `1` = send, `0` = skip this client | `1` |
+| `app_id` | app on the Notification Server | `smartpos` (default) |
+| `contract_id` | which contract to use | `review_sms` or `pos_bill_sms` (default) |
+| `language` | template language | `EN` (default) |
+| `country_code` | used to complete local numbers | `94`, `971` (required) |
+| `payload_template` | JSON of the contract's `payload`, with `{{placeholders}}` | see below |
+| `require_bill` | `1` = the bill must exist in `Sync_BillHdr` (receipt SMS); `0` = mobile-only SMS | `1` (default) or `0` |
+
+**Placeholders** the template can use: `{{client_id}}`, `{{bill_ref}}`, `{{bill_no}}`, `{{bill_date}}`, `{{loc_id}}`, `{{customer_name}}`, `{{mobile}}`, `{{language}}`. The template must produce the exact field names the contract on the Notification Server expects. This is the only thing that differs between clients.
+
+- Static text client (Madona, 81150): `{"mobile":"{{mobile}}","language":"{{language}}"}`, `contract_id = 'review_sms'`, `require_bill = 0`.
+- Bill link client (Happy Panda, 81201): `{"tenant_id":"{{client_id}}","bill_date":"{{bill_date}}","bill_no":"{{bill_no}}","billRef":"{{bill_ref}}","customer_name":"{{customer_name}}","mobile":"{{mobile}}","language":"{{language}}"}`, `contract_id = 'pos_bill_sms'`, `require_bill = 1`.
+
+A client **without a row** (or with `enabled = 0`) is skipped with the reason `client not configured or disabled`. That is the first thing to check when a new client sends nothing.
+
+### What the procedure does
+
+It is called by `Bill_SendSMS_New` as `exec GetBill_SMS_V2 @jsonInput = '{"bills":[...]}'` and handles every bill in the request:
+
+1. **Client configured and enabled?** Otherwise `SKIPPED: client not configured or disabled`.
+2. **Bill exists?** Only if `require_bill = 1`: looks for `client_id` + `billRef` in `Sync_BillHdr`. Otherwise `SKIPPED: bill not found`.
+3. **Clean the mobile number.** Removes spaces, `+`, `-` and brackets. `00…` loses the `00`. A leading `0` is replaced by the client's `country_code` (`0775779745` becomes `94775779745`). The result must be 10 to 15 digits, or `SKIPPED: invalid or missing mobile`.
+4. **Already sent?** If `POS_SMS_Log` has a `SUCCESS` or `QUEUED` row for the same client and bill, `SKIPPED: already sent`. A `PENDING` or `FAILED` row is retried.
+5. **Build the notify request** from the client's row: `{"client_id", "app_id", "contract_id", "channels":["sms"], "payload": <payload_template with the placeholders filled>}`.
+6. **Write the log:** `PENDING` for bills about to be sent, `SKIPPED` for real skips (not for plain duplicates). It reuses an earlier row for the same bill instead of adding a new one.
+7. **Return** one JSON result: `{"requests":[{"client_id","billRef","mobile","state":"READY|SKIPPED","reason","notify":{...}}]}`. `POS_BillSMS_SpResultToRequests` keeps only the `READY` ones. If the procedure fails, it returns `{"requests":[],"error":"…"}`.
+
+### `POS_SMS_Log`
+
+Columns used: `client_id`, `cust_name`, `mobile`, `sms_sent` (`Y`/`N`), `bill_ref`, `status`. Statuses: `PENDING` (about to send), `SKIPPED`, `SUCCESS`, `QUEUED`, `FAILED`.
+
+The procedure also has an `UPDATE` action (`{"action":"UPDATE","results":[{"client_id":…,"bill_ref":"…","status":"SUCCESS"}]}`) that turns `PENDING` into `SUCCESS`/`FAILED`. **Nothing calls it yet**, so rows stay `PENDING`. A bill with no mobile is skipped before API 2 (see section 3), so it gets no log row at all.
+
+### Setting up a new client
+
+1. Make sure `GetBill_SMS_V2.sql` has been run in that client's database.
+2. Insert the client's row in `POS_SMS_ClientConfig` (contract, country code, template, `require_bill`).
+3. Create the client on the Notification Server (`clients.yaml`: token, SMS credential, DocGen key if a receipt link is used) and load its contract.
+4. Put the token in the `tokens` of config box 2 on that client's server.
+5. Send a test bill and check `POS_SMS_Log` and the Notification Server reply.
+

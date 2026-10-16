@@ -1,0 +1,96 @@
+---
+title: Real customer examples
+description: Madona (static text) and Happy Panda (bill as a link).
+---
+
+## 2b. Examples (two real customers)
+
+Remote server ID used: `WEBCLOUD_SMSSRV`. The server id in each URL is the part after the port (`https://<host>:<port>/<server id>/jobschedularsms/<API name>`). Tokens below are placeholders; the real token is the `bearer_token` generated in the Notification Server's `clients.yaml`.
+
+| | Example A: static text only | Example B: text and the bill as a link |
+|---|---|---|
+| Server | `CLOUDSRV_MADONA` | `CLOUDSRV_HAPPYPANDA` |
+| Client id | 81150 | 81201 |
+| Contract | `review_sms` | `pos_bill_sms` |
+| `require_bill` | `0` (no bill needed) | `1` (bill must exist) |
+| SMS gateway credential | `textit_sms_gateway` | `dialog-esms-local-panda` |
+| Receipt link | no | yes (DocGen `dashboard_sales_invoice.yaml`) |
+
+### Example A: Madona, static text only (client 81150)
+
+The customer only gives a mobile number. The SMS is a fixed review request; the bill is not needed.
+
+**Config box 1** (Dispatch of `SyncDashboardData_New`):
+```json
+["https://web.mycomsys.com:9604/CLOUDSRV_MADONA/jobschedularsms/Bill_SendSMS_New"]
+```
+**Config box 2** (Dispatch of `Bill_SendSMS_New`):
+```json
+{"notify_url":"https://alert24.me:9603/api/v2/notify?wait=true","tokens":{"81150":"<bearer_token of 81150 from clients.yaml>"}}
+```
+**Client row** (run in the Madona database):
+```sql
+INSERT INTO dbo.POS_SMS_ClientConfig (client_id, country_code, contract_id, payload_template)
+VALUES (81150, '94', 'review_sms', N'{"mobile":"{{mobile}}","language":"{{language}}"}');
+UPDATE dbo.POS_SMS_ClientConfig SET require_bill = 0 WHERE client_id = 81150;
+```
+**Notification Server `clients.yaml`:**
+```yaml
+- client_id: "81150"
+  enabled: true
+  bearer_token: "<generated token>"
+  channel_credentials:
+    sms: textit_sms_gateway
+```
+**What happens with a number:** the notify call carries only the mobile:
+```json
+{"client_id":"81150","app_id":"smartpos","contract_id":"review_sms","channels":["sms"],"payload":{"mobile":"94775779745","language":"EN"}}
+```
+The Notification Server sends the fixed review text through the textit gateway. The POS gets `Success: "TRUE"`.
+
+**With no number:** `POS_SMS_SYNC_DispatchUrl` sends the call to `Bill_SMS_Skip`; nothing is sent; the POS still gets `Success: "TRUE"`.
+
+### Example B: Happy Panda, text and the bill as a link (client 81201)
+
+The SMS contains a short link; opening it shows the bill as a receipt.
+
+**Config box 1** (Dispatch of `SyncDashboardData_New`):
+```json
+["https://web.mycomsys.com:9604/CLOUDSRV_HAPPYPANDA/jobschedularsms/Bill_SendSMS_New"]
+```
+Use the host and port from that server's own log line `updateMemData … DispatchUrl value : …`; I assumed the same public address as Madona.
+
+**Config box 2** (Dispatch of `Bill_SendSMS_New`):
+```json
+{"notify_url":"https://alert24.me:9603/api/v2/notify?wait=true","tokens":{"81201":"<bearer_token of 81201 from clients.yaml>"}}
+```
+**Client row** (run in the Happy Panda database `RESTDB_ROYALPARK_LNK_OS`):
+```sql
+INSERT INTO dbo.POS_SMS_ClientConfig (client_id, country_code, contract_id, payload_template)
+VALUES (81201, '<country code>', 'pos_bill_sms',
+ N'{"tenant_id":"{{client_id}}","bill_date":"{{bill_date}}","bill_no":"{{bill_no}}","billRef":"{{bill_ref}}","customer_name":"{{customer_name}}","mobile":"{{mobile}}","language":"{{language}}"}');
+```
+`require_bill` stays at its default `1`. The contract's `location_id` field should be optional or removed, since there is no `loc_id` any more.
+
+**Notification Server `clients.yaml`:**
+```yaml
+- client_id: "81201"
+  enabled: true
+  bearer_token: "<generated token>"
+  channel_credentials:
+    sms: dialog-esms-local-panda
+  service_overrides:
+    docgen:
+      base_url: "https://alert24.me:9602"
+      auth_type: api_key
+      auth_header: X-API-Key
+      api_key: "<same key as in DocGen's client list for 81201>"
+```
+**What happens with a number:**
+1. The notify call carries the bill details: `{"client_id":"81201","app_id":"smartpos","contract_id":"pos_bill_sms","channels":["sms"],"payload":{"tenant_id":"81201","bill_date":"2026-10-13","bill_no":"44","billRef":"…","customer_name":"…","mobile":"…","language":"EN"}}`.
+2. The contract builds the text `Dear <name>, your bill #<no> dated <date> is ready. View: <short link>` and sends it through the Dialog gateway.
+3. When the customer opens the short link, the Notification Server calls DocGen with the 81201 key; DocGen reads the bill from CrudServer and shows the receipt.
+4. The POS gets `Success: "TRUE"`.
+
+**With no number:** same as Example A: skipped, nothing sent, the POS gets `Success: "TRUE"`.
+

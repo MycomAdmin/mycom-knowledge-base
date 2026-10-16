@@ -1,0 +1,19 @@
+---
+title: POS Bill SMS: the big picture
+description: How a POS bill is synced and an SMS is sent or skipped.
+---
+
+## 1. The big picture
+
+```
+POS ──► SyncDashboardData_New ──► (has a mobile?) ──yes──► Bill_SendSMS_New ──► Notification Server (alert24) ──► SMS
+          saves the bill                           └─no───► Bill_SMS_Skip   (answers 200, does nothing)
+          │
+          └─ final reply to the POS: Success "TRUE"   (the bill is saved, whatever happens to the SMS)
+```
+
+1. The POS sends the bill to **SyncDashboardData_New**. The bill is saved in the dashboard tables.
+2. If the customer has a mobile number, the call goes on to **Bill_SendSMS_New**, which asks the Notification Server to send the SMS with a receipt link.
+3. If there is no mobile number, the call goes to **Bill_SMS_Skip** instead. Nothing is sent.
+4. Either way, the POS gets one reply and uses it to update its flag.
+

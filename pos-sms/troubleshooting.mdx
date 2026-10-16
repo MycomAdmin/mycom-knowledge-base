@@ -1,0 +1,20 @@
+---
+title: Known limits and log checks
+description: What is not done yet and what to look for in logs.
+---
+
+## 6. Known limits
+
+- If a customer **has** a number but the Notification Server answers with an error (4xx/5xx, or it is down), `Bill_SendSMS_New` returns a non-2xx and `POS_SMS_SYNC_DispatchResponse` does not run. The POS then gets the raw error. This can only be fixed on the server side.
+- A mobile that is present but invalid (under 10 digits) or an SMS already sent for the same bill is skipped by `GetBill_SMS_V2`, which leaves nothing to send to the Notification Server. Treat this like the error case above, or add a `skip_url` for API 2.
+- The Notification Server reports `ok` when the SMS gateway answers HTTP 200, even if the gateway rejected the message (check `provider_ref` for `Err:`).
+- `POS_SMS_Log` rows stay `PENDING`; nothing updates them to SUCCESS or FAILED yet.
+
+## 7. Quick checks in the log
+
+| Log line | Meaning |
+|---|---|
+| `POS_SMS_SYNC_DispatchUrl: send` / `skip (no mobile)` | which way the bill went |
+| `POS_BillSMS_SpResultToRequests: N to send, M not sent` | how many bills were READY |
+| `POS_SMS_SYNC_DispatchResponse: TRUE | client … | ref …` | final reply built |
+| `restapi response statusCode : 400 … HTTP request to an HTTPS server` | the Dispatch URL setting still points to `http://localhost:8803` |
